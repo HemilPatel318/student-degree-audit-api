@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint (flake8)
+        run: flake8 .
+
+      - name: Tests with coverage gate (80%)
+        run: pytest --cov=. --cov-report=term-missing --cov-fail-under=80
+
+      - name: Integration test against a running server
+        run: |
+          uvicorn main:app --host 127.0.0.1 --port 8000 > server.log 2>&1 &
+          python scripts/run_integration.py http://127.0.0.1:8000 || (cat server.log; exit 1)
