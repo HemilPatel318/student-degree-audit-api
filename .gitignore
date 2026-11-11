@@ -1,0 +1,15 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+.pytest_cache/
+*.log
+selftest/selftest/api_url.txt
+api_url.txt
+server.log
+.coverage
+htmlcov/
+selftest/
