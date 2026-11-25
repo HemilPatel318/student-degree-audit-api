@@ -5,15 +5,38 @@ course plan, and audits that plan against the program rules.
 
 ## Endpoints
 
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/api/v1/admin/catalog/import` | Upload catalog HTML |
-| GET | `/api/v1/catalog/courses/{course_code}` | Look up one course |
-| POST | `/api/v1/students/{id}/history/import` | Upload transcript HTML (creates the student) |
-| PUT / DELETE | `/api/v1/students/{id}/history` | Replace or clear history |
-| POST / PUT / DELETE | `/api/v1/students/{id}/plan` | Save, replace or clear the plan |
-| GET | `/api/v1/students/{id}/profile` | History and plan |
-| GET | `/api/v1/students/{id}/audit-report?strict=<bool>` | Degree audit |
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/api/v1/auth/register` | none | Create a student account (201, 409 if taken) |
+| POST | `/api/v1/auth/login` | none | Returns `{"access_token", "token_type": "bearer"}` |
+| POST | `/api/v1/admin/catalog/import` | none | Upload catalog HTML |
+| GET | `/api/v1/catalog/courses/{course_code}` | none | Look up one course |
+| POST | `/api/v1/students/{id}/history/import` | owner | Upload transcript HTML (creates the student) |
+| PUT / DELETE | `/api/v1/students/{id}/history` | none | Replace or clear history |
+| POST / PUT / DELETE | `/api/v1/students/{id}/plan` | none | Save, replace or clear the plan |
+| GET | `/api/v1/students/{id}/plan` | owner or admin | Saved plan |
+| GET | `/api/v1/students/{id}/profile` | owner or admin | History and plan |
+| GET | `/api/v1/students/{id}/audit-report?strict=<bool>` | rate limited | Degree audit, 10 requests per 60 s |
+| GET | `/api/v1/students/{id}/recommendations` | owner or admin | Prerequisite-ordered pathway by term |
+
+## Authentication
+
+- Passwords are stored as bcrypt hashes in memory. A built-in `admin` / `admin`
+  account (role `admin`) exists without registering.
+- Tokens are HS256 JWTs carrying `sub` (username) and `role`, valid for 60 minutes.
+  The signing key comes from `JWT_SECRET`, with a random key generated at startup if unset.
+- Send `Authorization: Bearer <token>`. A missing, invalid or expired token, or a
+  token for a different student, gets 401. "Owner" means the token's `sub` equals `{id}`.
+- The audit report allows 10 requests in a sliding 60 s window per token subject
+  (per client IP without a token). Further requests get 429.
+
+## Recommendations
+
+Completed courses are removed from the catalog, then the remaining prerequisite
+graph is sorted level by level with Kahn's algorithm. Each level is one term,
+alternating Fall and Winter (`26F -> 27W -> 27F`), starting after the student's
+latest history term. Prerequisites outside the catalog are ignored, and courses
+in a prerequisite cycle are left out.
 
 ## Audit rules
 

@@ -2,17 +2,26 @@
 
 from threading import RLock
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
+import auth
 from audit import build_audit
 from catalog import normalize_code, parse_catalog
+from ratelimit import SlidingWindowLimiter
+from recommend import build_pathway
 from transcript import parse_transcript
 
 app = FastAPI(title="Student Degree Audit API")
 app.state.catalog = {}
 app.state.students = {}
 app.state.lock = RLock()
+audit_limiter = SlidingWindowLimiter(limit=10, window_seconds=60)
+
+
+class Credentials(BaseModel):
+    username: str
+    password: str
 
 
 class PastCourse(BaseModel):
@@ -47,6 +56,25 @@ def root():
     return {"message": "Student Degree Audit API is running"}
 
 
+# Phase 4: authentication
+
+@app.post("/api/v1/auth/register", status_code=201)
+def register(body: Credentials):
+    if not body.username.strip() or not body.password:
+        raise HTTPException(status_code=422, detail="Username and password are required")
+    if not auth.register_user(body.username, body.password):
+        raise HTTPException(status_code=409, detail="Username already exists")
+    return {"status": "registered"}
+
+
+@app.post("/api/v1/auth/login")
+def login(body: Credentials):
+    role = auth.authenticate(body.username, body.password)
+    if role is None:
+        raise auth.unauthorized("Invalid username or password")
+    return {"access_token": auth.create_token(body.username, role), "token_type": "bearer"}
+
+
 # Phase 1: catalog
 
 @app.post("/api/v1/admin/catalog/import")
@@ -77,7 +105,9 @@ def get_course(course_code: str):
 # Phase 2: history, plan, profile
 
 @app.post("/api/v1/students/{student_id}/history/import", status_code=201)
-async def import_history(student_id: str, file: UploadFile = File(...)):
+async def import_history(student_id: str, file: UploadFile = File(...),
+                         claims: dict = Depends(auth.current_claims)):
+    auth.require_owner(student_id, claims)
     html = (await file.read()).decode("utf-8-sig", errors="replace")
     history = parse_transcript(html)
     with app.state.lock:
@@ -117,6 +147,14 @@ def replace_plan(student_id: str, payload: PlanPayload):
     return store_plan(student_id, payload)
 
 
+@app.get("/api/v1/students/{student_id}/plan")
+def get_plan(student_id: str, claims: dict = Depends(auth.current_claims)):
+    auth.require_owner_or_admin(student_id, claims)
+    with app.state.lock:
+        plan = [dict(c) for c in require_student(student_id)["plan"]]
+    return {"student_id": student_id, "plan": plan}
+
+
 @app.delete("/api/v1/students/{student_id}/plan")
 def delete_plan(student_id: str):
     with app.state.lock:
@@ -125,7 +163,8 @@ def delete_plan(student_id: str):
 
 
 @app.get("/api/v1/students/{student_id}/profile")
-def get_profile(student_id: str):
+def get_profile(student_id: str, claims: dict = Depends(auth.current_claims)):
+    auth.require_owner_or_admin(student_id, claims)
     with app.state.lock:
         student = require_student(student_id)
         return {
@@ -135,10 +174,23 @@ def get_profile(student_id: str):
         }
 
 
-# Phase 3: audit
+# Phase 3: audit (Phase 4 adds the rate limit)
+
+def rate_key(request: Request, claims) -> str:
+    """Per JWT subject when a valid token is sent, otherwise per client IP."""
+    if claims and claims.get("sub"):
+        return f"user:{claims['sub']}"
+    forwarded = request.headers.get("x-forwarded-for", "")
+    ip = forwarded.split(",")[0].strip() or (request.client.host if request.client else "")
+    return f"ip:{ip}"
+
 
 @app.get("/api/v1/students/{student_id}/audit-report")
-def audit_report(student_id: str, strict: bool = False):
+def audit_report(request: Request, student_id: str, strict: bool = False,
+                 claims=Depends(auth.optional_claims)):
+    if not audit_limiter.allow(rate_key(request, claims)):
+        raise HTTPException(status_code=429, detail="Too many requests, try again in a minute",
+                            headers={"Retry-After": "60"})
     with app.state.lock:
         student = require_student(student_id)
         return build_audit(
@@ -148,3 +200,14 @@ def audit_report(student_id: str, strict: bool = False):
             dict(app.state.catalog),
             strict=strict,
         )
+
+
+# Phase 4: recommendations
+
+@app.get("/api/v1/students/{student_id}/recommendations")
+def recommendations(student_id: str, claims: dict = Depends(auth.current_claims)):
+    auth.require_owner_or_admin(student_id, claims)
+    with app.state.lock:
+        history = list(require_student(student_id)["history"])
+        catalog = dict(app.state.catalog)
+    return {"student_id": student_id, "recommended_pathway": build_pathway(history, catalog)}

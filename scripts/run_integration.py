@@ -40,6 +40,13 @@ def main(base_url: str) -> int:
         wait_until_up(client)
         student = f"/api/v1/students/{STUDENT}"
 
+        creds = {"username": STUDENT, "password": "integration-pass"}
+        r = client.post("/api/v1/auth/register", json=creds)
+        results.append(check("register -> 201", r.status_code == 201))
+        r = client.post("/api/v1/auth/login", json=creds)
+        results.append(check("login -> 200", r.status_code == 200))
+        client.headers["Authorization"] = f"Bearer {r.json().get('access_token', '')}"
+
         r = upload(client, "/api/v1/admin/catalog/import", "sample_catalog.html")
         results.append(check("catalog import", r.status_code == 200))
         r = client.get("/api/v1/catalog/courses/COSC3506")
@@ -64,6 +71,13 @@ def main(base_url: str) -> int:
 
         strict = client.get(f"{student}/audit-report", params={"strict": "true"}).json()
         results.append(check("strict=true -> failed", strict.get("status") == "failed"))
+
+        r = client.get(f"{student}/recommendations")
+        pathway = r.json().get("recommended_pathway", [])
+        results.append(check("recommendations -> 200", r.status_code == 200 and bool(pathway)))
+
+        r = client.get(f"{student}/profile", headers={"Authorization": ""})
+        results.append(check("profile without token -> 401", r.status_code == 401))
 
         r = client.get("/api/v1/students/does-not-exist/audit-report")
         results.append(check("unknown student -> 404", r.status_code == 404))

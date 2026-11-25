@@ -5,20 +5,32 @@ pytest.importorskip("httpx")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from main import app  # noqa: E402
+import auth  # noqa: E402
+from main import app, audit_limiter  # noqa: E402
 
-BASE = "/api/v1/students/770001"
+STUDENT = "770001"
+BASE = f"/api/v1/students/{STUDENT}"
+
+
+def token_for(client, username, password="pass-123"):
+    client.post("/api/v1/auth/register", json={"username": username, "password": password})
+    r = client.post("/api/v1/auth/login", json={"username": username, "password": password})
+    return {"Authorization": f"Bearer {r.json()['access_token']}"}
 
 
 @pytest.fixture
 def client():
     app.state.catalog = {}
     app.state.students = {}
-    return TestClient(app)
+    auth.reset_users()
+    audit_limiter.reset()
+    test_client = TestClient(app)
+    test_client.headers.update(token_for(test_client, STUDENT))
+    return test_client
 
 
-def upload(client, path, content, name="file.html"):
-    return client.post(path, files={"file": (name, content, "text/html")})
+def upload(client, path, content, name="file.html", **kwargs):
+    return client.post(path, files={"file": (name, content, "text/html")}, **kwargs)
 
 
 @pytest.fixture
@@ -58,6 +70,7 @@ def test_history_plan_profile(loaded):
 
 
 def test_unknown_student_is_404(client):
+    client.headers.update(token_for(client, "nobody"))
     assert client.get("/api/v1/students/nobody/profile").status_code == 404
     assert client.get("/api/v1/students/nobody/audit-report").status_code == 404
     assert client.post("/api/v1/students/nobody/plan",
